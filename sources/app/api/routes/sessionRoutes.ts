@@ -237,11 +237,17 @@ export function sessionRoutes(app: Fastify) {
             }
         });
         if (session) {
+            // Fetch user's current seq for proper update filtering on client
+            const account = await db.account.findUnique({
+                where: { id: userId },
+                select: { seq: true }
+            });
             log({ module: 'session-create', sessionId: session.id, userId, tag }, `Found existing session: ${session.id} for tag ${tag}`);
             return reply.send({
                 session: {
                     id: session.id,
                     seq: session.seq,
+                    userSeq: account?.seq ?? 0,
                     metadata: session.metadata,
                     metadataVersion: session.metadataVersion,
                     agentState: session.agentState,
@@ -290,6 +296,7 @@ export function sessionRoutes(app: Fastify) {
                 session: {
                     id: session.id,
                     seq: session.seq,
+                    userSeq: updSeq,
                     metadata: session.metadata,
                     metadataVersion: session.metadataVersion,
                     agentState: session.agentState,
