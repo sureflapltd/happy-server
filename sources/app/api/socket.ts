@@ -28,6 +28,7 @@ export function startSocket(app: Fastify) {
         allowUpgrades: true,
         upgradeTimeout: 10000,
         connectTimeout: 20000,
+        maxHttpBufferSize: 10 * 1024 * 1024, // 10MB (default 1MB) - for bulk message uploads
         serveClient: false // Don't serve the client files
     });
 

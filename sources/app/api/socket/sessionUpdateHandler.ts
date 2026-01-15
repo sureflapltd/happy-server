@@ -3,7 +3,6 @@ import { activityCache } from "@/app/presence/sessionCache";
 import { buildNewMessageUpdate, buildSessionActivityEphemeral, buildUpdateSessionUpdate, ClientConnection, eventRouter } from "@/app/events/eventRouter";
 import { db } from "@/storage/db";
 import { allocateSessionSeq, allocateUserSeq } from "@/storage/seq";
-import { AsyncLock } from "@/utils/lock";
 import { log } from "@/utils/log";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { Socket } from "socket.io";
@@ -182,57 +181,67 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
         }
     });
 
-    const receiveMessageLock = new AsyncLock();
+    // Message handler processes messages in parallel - no lock needed because:
+    // 1. Sequence allocation uses atomic DB increments
+    // 2. Duplicate prevention uses @@unique([sessionId, localId]) constraint
+    // 3. Session validation is done per-connection for session-scoped connections
     socket.on('message', async (data: any, callback?: (response: { ok: boolean }) => void) => {
-        await receiveMessageLock.inLock(async () => {
-            try {
-                websocketEventsCounter.inc({ event_type: 'message' });
-                const { sid, message, localId, timestamp } = data;
+        try {
+            websocketEventsCounter.inc({ event_type: 'message' });
+            const { sid, message, localId, timestamp } = data;
 
-                log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}, timestamp=${timestamp}`);
+            log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}, timestamp=${timestamp}`);
 
-                // Resolve session
+            // For session-scoped connections, trust the connection's session validation
+            // For user-scoped connections, verify session ownership
+            if (connection.connectionType === 'user-scoped') {
                 const session = await db.session.findUnique({
                     where: { id: sid, accountId: userId }
                 });
                 if (!session) {
+                    if (callback) {
+                        callback({ ok: false });
+                    }
                     return;
                 }
-                let useLocalId = typeof localId === 'string' ? localId : null;
-
-                // Validate timestamp: missing or future -> now, past -> preserve
-                let createdAt: Date | undefined;
-                if (typeof timestamp === 'number') {
-                    const now = Date.now();
-                    if (timestamp > now) {
-                        createdAt = new Date(now);  // Future: cap to now
-                    } else {
-                        createdAt = new Date(timestamp);  // Past: preserve original
-                    }
+            } else if (connection.connectionType === 'session-scoped' && connection.sessionId !== sid) {
+                // Session-scoped connection trying to write to different session
+                log({ module: 'websocket', level: 'warn' }, `Session-scoped connection ${socket.id} tried to write to different session: ${sid} (expected ${connection.sessionId})`);
+                if (callback) {
+                    callback({ ok: false });
                 }
-                // If undefined, Prisma uses @default(now())
+                return;
+            }
 
-                // Create encrypted message
-                const msgContent: PrismaJson.SessionMessageContent = {
-                    t: 'encrypted',
-                    c: message
-                };
+            let useLocalId = typeof localId === 'string' ? localId : null;
 
-                // Resolve seq
-                const updSeq = await allocateUserSeq(userId);
-                const msgSeq = await allocateSessionSeq(sid);
-
-                // Check if message already exists
-                if (useLocalId) {
-                    const existing = await db.sessionMessage.findFirst({
-                        where: { sessionId: sid, localId: useLocalId }
-                    });
-                    if (existing) {
-                        return { msg: existing, update: null };
-                    }
+            // Validate timestamp: missing or future -> now, past -> preserve
+            let createdAt: Date | undefined;
+            if (typeof timestamp === 'number') {
+                const now = Date.now();
+                if (timestamp > now) {
+                    createdAt = new Date(now);  // Future: cap to now
+                } else {
+                    createdAt = new Date(timestamp);  // Past: preserve original
                 }
+            }
+            // If undefined, Prisma uses @default(now())
 
-                // Create message
+            // Create encrypted message
+            const msgContent: PrismaJson.SessionMessageContent = {
+                t: 'encrypted',
+                c: message
+            };
+
+            // Allocate sequences in parallel (both use atomic increments)
+            const [updSeq, msgSeq] = await Promise.all([
+                allocateUserSeq(userId),
+                allocateSessionSeq(sid)
+            ]);
+
+            // Create message - rely on @@unique([sessionId, localId]) for duplicate prevention
+            // instead of doing a separate findFirst query
+            try {
                 const msg = await db.sessionMessage.create({
                     data: {
                         sessionId: sid,
@@ -244,26 +253,40 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 });
 
                 // Emit new message update to relevant clients
+                // When sender is session-scoped (CLI), only notify user-scoped connections (mobile/web)
+                // to prevent update floods during bulk uploads. CLIs already know about their own messages.
+                // When sender is user-scoped (mobile/web), notify all interested connections.
                 const updatePayload = buildNewMessageUpdate(msg, sid, updSeq, randomKeyNaked(12));
+                const recipientFilter = connection.connectionType === 'session-scoped'
+                    ? { type: 'user-scoped-only' as const }
+                    : { type: 'all-interested-in-session' as const, sessionId: sid };
                 eventRouter.emitUpdate({
                     userId,
                     payload: updatePayload,
-                    recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
+                    recipientFilter,
                     skipSenderConnection: connection
                 });
-
-                // Acknowledge message receipt (for backpressure flow control)
-                if (callback) {
-                    callback({ ok: true });
-                }
-            } catch (error) {
-                log({ module: 'websocket', level: 'error' }, `Error in message handler: ${error}`);
-                // Acknowledge even on error to prevent client from blocking
-                if (callback) {
-                    callback({ ok: false });
+            } catch (createError: any) {
+                // Handle unique constraint violation (duplicate message) - treat as success
+                if (createError?.code === 'P2002') {
+                    log({ module: 'websocket' }, `Duplicate message ignored: sessionId=${sid}, localId=${useLocalId}`);
+                    // Don't emit update for duplicate, but acknowledge success
+                } else {
+                    throw createError;
                 }
             }
-        });
+
+            // Acknowledge message receipt (for backpressure flow control)
+            if (callback) {
+                callback({ ok: true });
+            }
+        } catch (error) {
+            log({ module: 'websocket', level: 'error' }, `Error in message handler: ${error}`);
+            // Acknowledge even on error to prevent client from blocking
+            if (callback) {
+                callback({ ok: false });
+            }
+        }
     });
 
     socket.on('session-end', async (data: {
