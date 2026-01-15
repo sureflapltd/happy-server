@@ -337,7 +337,7 @@ export function sessionRoutes(app: Fastify) {
 
         const messages = await db.sessionMessage.findMany({
             where: { sessionId },
-            orderBy: { createdAt: 'desc' },
+            orderBy: [{ createdAt: 'desc' }, { seq: 'desc' }],
             take: 150,
             select: {
                 id: true,

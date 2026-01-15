@@ -183,13 +183,13 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
     });
 
     const receiveMessageLock = new AsyncLock();
-    socket.on('message', async (data: any) => {
+    socket.on('message', async (data: any, callback?: (response: { ok: boolean }) => void) => {
         await receiveMessageLock.inLock(async () => {
             try {
                 websocketEventsCounter.inc({ event_type: 'message' });
-                const { sid, message, localId } = data;
+                const { sid, message, localId, timestamp } = data;
 
-                log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}`);
+                log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}, timestamp=${timestamp}`);
 
                 // Resolve session
                 const session = await db.session.findUnique({
@@ -199,6 +199,18 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                     return;
                 }
                 let useLocalId = typeof localId === 'string' ? localId : null;
+
+                // Validate timestamp: missing or future -> now, past -> preserve
+                let createdAt: Date | undefined;
+                if (typeof timestamp === 'number') {
+                    const now = Date.now();
+                    if (timestamp > now) {
+                        createdAt = new Date(now);  // Future: cap to now
+                    } else {
+                        createdAt = new Date(timestamp);  // Past: preserve original
+                    }
+                }
+                // If undefined, Prisma uses @default(now())
 
                 // Create encrypted message
                 const msgContent: PrismaJson.SessionMessageContent = {
@@ -226,7 +238,8 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                         sessionId: sid,
                         seq: msgSeq,
                         content: msgContent,
-                        localId: useLocalId
+                        localId: useLocalId,
+                        ...(createdAt && { createdAt })
                     }
                 });
 
@@ -238,8 +251,17 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                     recipientFilter: { type: 'all-interested-in-session', sessionId: sid },
                     skipSenderConnection: connection
                 });
+
+                // Acknowledge message receipt (for backpressure flow control)
+                if (callback) {
+                    callback({ ok: true });
+                }
             } catch (error) {
                 log({ module: 'websocket', level: 'error' }, `Error in message handler: ${error}`);
+                // Acknowledge even on error to prevent client from blocking
+                if (callback) {
+                    callback({ ok: false });
+                }
             }
         });
     });
