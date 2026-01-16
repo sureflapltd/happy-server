@@ -139,6 +139,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
         sid: string;
         time: number;
         thinking?: boolean;
+        compacting?: boolean;
     }) => {
         try {
             // Track metrics
@@ -158,7 +159,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
                 return;
             }
 
-            const { sid, thinking } = data;
+            const { sid, thinking, compacting } = data;
 
             // Check session validity using cache
             const isValid = await activityCache.isSessionValid(sid, userId);
@@ -170,7 +171,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             activityCache.queueSessionUpdate(sid, t);
 
             // Emit session activity update
-            const sessionActivity = buildSessionActivityEphemeral(sid, true, t, thinking || false);
+            const sessionActivity = buildSessionActivityEphemeral(sid, true, t, thinking || false, compacting || false);
             eventRouter.emitEphemeral({
                 userId,
                 payload: sessionActivity,
@@ -321,7 +322,7 @@ export function sessionUpdateHandler(userId: string, socket: Socket, connection:
             });
 
             // Emit session activity update
-            const sessionActivity = buildSessionActivityEphemeral(sid, false, t, false);
+            const sessionActivity = buildSessionActivityEphemeral(sid, false, t, false, false);
             eventRouter.emitEphemeral({
                 userId,
                 payload: sessionActivity,
