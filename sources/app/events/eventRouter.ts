@@ -73,6 +73,7 @@ export type UpdateEvent = {
         value: string | null;
         version: number;
     } | null | undefined;
+    dataEncryptionKey?: string | null | undefined;
 } | {
     type: 'update-account';
     userId: string;

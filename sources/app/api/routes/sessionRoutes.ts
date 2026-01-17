@@ -250,6 +250,33 @@ export function sessionRoutes(app: Fastify) {
                     }
                 });
                 log({ module: 'session-create', sessionId: session.id, userId, tag }, `Updated existing session: ${session.id} with new metadata/key`);
+
+                // Emit update event to notify mobile app of new metadata and encryption key
+                // This is critical for resumed sessions to work correctly
+                const updSeq = await allocateUserSeq(userId);
+                eventRouter.emitUpdate({
+                    userId,
+                    payload: {
+                        id: randomKeyNaked(12),
+                        seq: updSeq,
+                        createdAt: Date.now(),
+                        body: {
+                            t: 'update-session',
+                            id: session.id,
+                            ...(metadata ? {
+                                metadata: {
+                                    value: session.metadata,
+                                    version: session.metadataVersion
+                                }
+                            } : {}),
+                            ...(dataEncryptionKey ? {
+                                dataEncryptionKey: dataEncryptionKey
+                            } : {})
+                        }
+                    },
+                    recipientFilter: { type: 'user-scoped-only' }
+                });
+                log({ module: 'session-create', sessionId: session.id, userId, tag }, `Emitted update-session event for resumed session`);
             }
 
             // Fetch user's current seq for proper update filtering on client
