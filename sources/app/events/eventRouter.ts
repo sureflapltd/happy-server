@@ -482,14 +482,15 @@ export function buildUpdateMachineUpdate(machineId: string, updateSeq: number, u
     };
 }
 
-export function buildSessionActivityEphemeral(sessionId: string, active: boolean, activeAt: number, thinking?: boolean, compacting?: boolean): EphemeralPayload {
+export function buildSessionActivityEphemeral(sessionId: string, active: boolean, activeAt: number, thinking?: boolean, compacting?: boolean, currentTool?: string): EphemeralPayload {
     return {
         type: 'activity',
         id: sessionId,
         active,
         activeAt,
         thinking: thinking || false,
-        compacting: compacting || false
+        compacting: compacting || false,
+        ...(currentTool && { currentTool })
     };
 }
 

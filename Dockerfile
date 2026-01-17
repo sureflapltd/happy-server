@@ -10,8 +10,8 @@ WORKDIR /app
 COPY package.json yarn.lock ./
 COPY ./prisma ./prisma
 
-# Install dependencies
-RUN yarn install --frozen-lockfile --ignore-engines
+# Install dependencies (NODE_TLS_REJECT_UNAUTHORIZED=0 for Prisma binary download)
+RUN NODE_TLS_REJECT_UNAUTHORIZED=0 yarn install --frozen-lockfile --ignore-engines
 
 # Copy the rest of the application code
 COPY ./tsconfig.json ./tsconfig.json
