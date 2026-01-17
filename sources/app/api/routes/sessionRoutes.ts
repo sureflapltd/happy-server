@@ -230,13 +230,28 @@ export function sessionRoutes(app: Fastify) {
         const userId = request.userId;
         const { tag, metadata, dataEncryptionKey } = request.body;
 
-        const session = await db.session.findFirst({
+        let session = await db.session.findFirst({
             where: {
                 accountId: userId,
                 tag: tag
             }
         });
         if (session) {
+            // Session exists - update metadata and encryption key if provided
+            // This allows CLI to re-encrypt session data when resuming
+            // (CLI generates new random key each time for dataKey encryption)
+            const needsUpdate = metadata || dataEncryptionKey;
+            if (needsUpdate) {
+                session = await db.session.update({
+                    where: { id: session.id },
+                    data: {
+                        ...(metadata ? { metadata, metadataVersion: { increment: 1 } } : {}),
+                        ...(dataEncryptionKey ? { dataEncryptionKey: new Uint8Array(Buffer.from(dataEncryptionKey, 'base64')) } : {})
+                    }
+                });
+                log({ module: 'session-create', sessionId: session.id, userId, tag }, `Updated existing session: ${session.id} with new metadata/key`);
+            }
+
             // Fetch user's current seq for proper update filtering on client
             const account = await db.account.findUnique({
                 where: { id: userId },
