@@ -1,9 +1,10 @@
+import { FastifyError } from "fastify";
 import { log } from "@/utils/log";
 import { Fastify } from "../types";
 
 export function enableErrorHandlers(app: Fastify) {
     // Global error handler
-    app.setErrorHandler(async (error, request, reply) => {
+    app.setErrorHandler(async (error: FastifyError, request, reply) => {
         const method = request.method;
         const url = request.url;
         const userAgent = request.headers['user-agent'] || 'unknown';
@@ -49,7 +50,7 @@ export function enableErrorHandlers(app: Fastify) {
     });
 
     // Error hook for additional logging
-    app.addHook('onError', async (request, reply, error) => {
+    app.addHook('onError', async (request, reply, error: FastifyError) => {
         const method = request.method;
         const url = request.url;
         const duration = (Date.now() - (request.startTime || Date.now())) / 1000;
